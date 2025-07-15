@@ -237,7 +237,7 @@ namespace ControllerCommands {
     void Controller::commandLoopPA(LockFreeQueue<std::vector<char>>& senderQueue, std::condition_variable& senderCv, std::mutex& senderMutex, std::atomic_bool& error) {
         const std::chrono::microseconds earlyWake(1000);
         m_nextStateChange = WallClock::max();
-        auto cmd = ControllerCommand {};
+        ControllerCommand last_cmd{};
         m_ccThreadRunning = true;
         Logger::instance().log("commandLoopPA() started.");
 
@@ -245,19 +245,26 @@ namespace ControllerCommands {
         while (!error) {
             WallClock now = std::chrono::steady_clock::now();
             if (now >= m_nextStateChange) {
+                ControllerCommand cmd;
                 if (!m_ccQueue.empty()) {
                     m_ccQueue.pop(cmd);
                     Logger::instance().log("commandLoopPA() processing command (seqnum " + std::to_string(cmd.seqnum) + ").");
                     cqSendState(cmd, senderQueue, senderCv, senderMutex);
-                    cmd.seqnum = 0;
                     m_nextStateChange = now + std::chrono::milliseconds(cmd.milliseconds);
                 } else {
                     Logger::instance().log("commandLoopPA() clearing state (seqnum " + std::to_string(cmd.seqnum) + ").");
                     cmd.state.clear();
                     cqSendState(cmd, senderQueue, senderCv, senderMutex);
-                    cmd.seqnum = 0;
                     m_nextStateChange = WallClock::max();
                 }
+
+                if (last_cmd.seqnum != 0){
+                    Logger::instance().log("cqSendState() command finished with seqnum: " + std::to_string(last_cmd.seqnum));
+                    std::string res = "cqCommandFinished " + std::to_string(last_cmd.seqnum) + "\r\n";
+                    senderQueue.push(std::vector<char>(res.begin(), res.end()));
+                    senderCv.notify_one();
+                }
+                last_cmd = cmd;
             }
 
             m_ccCv.wait_until(lock, m_nextStateChange - earlyWake, [&] { return error || (now + earlyWake >= m_nextStateChange && !m_replaceOnNext); });
@@ -280,12 +287,6 @@ namespace ControllerCommands {
      */
     void Controller::cqSendState(const ControllerCommand& cmd, LockFreeQueue<std::vector<char>>& senderQueue, std::condition_variable& senderCv, std::mutex& senderMutex) {
         cqControllerState(cmd);
-        if (cmd.seqnum != 0) {
-            Logger::instance().log("cqSendState() command finished with seqnum: " + std::to_string(cmd.seqnum));
-            std::string res = "cqCommandFinished " + std::to_string(cmd.seqnum) + "\r\n";
-            senderQueue.push(std::vector<char>(res.begin(), res.end()));
-            senderCv.notify_one();
-        }
     }
 
     /**
